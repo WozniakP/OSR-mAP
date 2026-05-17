@@ -1,0 +1,14 @@
+[project]
+name = "osr-map"
+version = "0.1.0"
+description = "Open-Set Retrieval mAP metric"
+authors = [{ name="Piotr Wozniak"}]
+dependencies = [
+    "numpy",
+    "scikit-learn"
+]
+requires-python = ">=3.8"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
