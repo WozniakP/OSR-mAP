@@ -3,10 +3,21 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import auc
 
 
-# Computes Average Precision (AP) for a single query
-# based on a binary relevance vector.
-# rel[k] = 1 means that the item at rank k is relevant.
 def _compute_ap(rel):
+    """
+    Computes Average Precision (AP) for a single query.
+
+    Parameters
+    ----------
+    rel : array-like
+        Binary relevance vector.
+        rel[k] = 1 means the item at rank k is relevant.
+
+    Returns
+    -------
+    float
+        Average Precision.
+    """
     rel = np.asarray(rel).astype(np.int32)
 
     if rel.sum() == 0:
@@ -23,16 +34,6 @@ def _compute_ap(rel):
     return float(np.mean(precisions))
 
 
-# Computes Open-Set Retrieval mean Average Precision (OSR-mAP).
-#
-# This metric evaluates retrieval quality under open-set conditions.
-# It combines:
-# - AP for known queries,
-# - rejection of unknown queries using distance thresholds,
-# - area under the KAP-vs-FAR curve.
-#
-# ranking_labels defines the evaluated ranking depth K,
-# so the score can be interpreted as OSR-mAP@K.
 def osr_map_score(
     y_true,
     ranking_labels,
@@ -44,6 +45,14 @@ def osr_map_score(
     """
     Open-Set Retrieval mean Average Precision (OSR-mAP).
 
+    The metric jointly evaluates:
+
+    - retrieval quality on known queries,
+    - rejection of unknown queries,
+    - performance across all operating thresholds.
+
+    It is computed as the area under the KAP-vs-FAR curve.
+
     Parameters
     ----------
     y_true : array-like of shape (n_queries,)
@@ -51,14 +60,17 @@ def osr_map_score(
 
     ranking_labels : array-like of shape (n_queries, rank_len)
         Ranked retrieved labels for each query.
-        The ranking length defines K, so this is effectively OSR-mAP@K.
+        The ranking length defines K, so the metric can be
+        interpreted as OSR-mAP@K.
 
     distances : array-like of shape (n_queries,)
-        Distance / uncertainty score for each query.
-        Lower value means more confident / more likely known.
+        Distance / anomaly score.
+
+        Lower values indicate higher confidence that the query
+        belongs to a known class.
 
     ref_set : set
-        Set of known classes.
+        Set of known reference classes.
 
     return_curve : bool, default=False
         If True, returns score, FAR, KAP and mode.
@@ -69,8 +81,16 @@ def osr_map_score(
     Returns
     -------
     float or dict
-        If return_curve=False, returns only OSR-mAP score.
-        If return_curve=True, returns a dictionary.
+        If return_curve=False:
+            returns OSR-mAP score.
+
+        If return_curve=True:
+            returns dictionary with:
+
+            - score
+            - mode
+            - far
+            - kap
     """
 
     y_true = np.asarray(y_true)
@@ -82,16 +102,23 @@ def osr_map_score(
         raise ValueError("y_true must be a 1D array.")
 
     if ranking_labels.ndim != 2:
-        raise ValueError("ranking_labels must be a 2D array: (n_queries, rank_len).")
+        raise ValueError(
+            "ranking_labels must be a 2D array: "
+            "(n_queries, rank_len)."
+        )
 
     if distances.ndim != 1:
         raise ValueError("distances must be a 1D array.")
 
     if len(y_true) != len(ranking_labels):
-        raise ValueError("y_true and ranking_labels must have the same number of queries.")
+        raise ValueError(
+            "y_true and ranking_labels must have the same number of queries."
+        )
 
     if len(y_true) != len(distances):
-        raise ValueError("y_true and distances must have the same number of queries.")
+        raise ValueError(
+            "y_true and distances must have the same number of queries."
+        )
 
     known_mask = np.array([g in ref_set for g in y_true])
     unknown_mask = ~known_mask
@@ -102,9 +129,11 @@ def osr_map_score(
     # -------------------------
     # AP per query
     # -------------------------
+
     ap_array = np.zeros(len(y_true), dtype=np.float32)
 
     for i, g in enumerate(y_true):
+
         if g not in ref_set:
             continue
 
@@ -114,26 +143,31 @@ def osr_map_score(
     # -------------------------
     # Unknown-only case
     # -------------------------
+
     if num_known == 0:
+
         result = {
             "score": None,
             "mode": "unknown-only",
             "far": None,
-            "kap": None
+            "kap": None,
         }
+
         return result if return_curve else None
 
     # -------------------------
     # Closed-set case
     # -------------------------
+
     if num_unknown == 0:
+
         score = float(ap_array[known_mask].mean())
 
         result = {
             "score": score,
             "mode": "closed-set",
             "far": None,
-            "kap": None
+            "kap": None,
         }
 
         return result if return_curve else score
@@ -141,25 +175,33 @@ def osr_map_score(
     # -------------------------
     # Open-set case
     # -------------------------
+
     eps = 1e-9
 
     thresholds = np.unique(distances)
+
     thresholds = np.concatenate([
         [distances.min() - eps],  # reject all
         thresholds,
-        [distances.max() + eps]   # accept all
+        [distances.max() + eps],  # accept all
     ])
 
     far_list = []
     kap_list = []
 
     for t in thresholds:
+
         accepted = distances <= t
 
-        far = np.sum(accepted & unknown_mask) / num_unknown
+        # False Acceptance Rate
+        far = np.sum(
+            accepted & unknown_mask
+        ) / num_unknown
 
+        # Known-query Average Precision
         kap = np.sum(
-            ap_array[known_mask] * accepted[known_mask]
+            ap_array[known_mask] *
+            accepted[known_mask]
         ) / num_known
 
         far_list.append(far)
@@ -168,31 +210,53 @@ def osr_map_score(
     far = np.asarray(far_list, dtype=np.float32)
     kap = np.asarray(kap_list, dtype=np.float32)
 
+    # -------------------------
     # Sort by FAR
+    # -------------------------
+
     order = np.argsort(far)
+
     far = far[order]
     kap = kap[order]
 
-    # For duplicated FAR values, keep the best KAP
+    # -------------------------
+    # Upper-envelope construction
+    #
+    # For duplicated FAR values retain
+    # the maximum KAP.
+    # -------------------------
+
     unique_far = []
     best_kap = []
 
     for f in np.unique(far):
+
         mask = far == f
+
         unique_far.append(f)
         best_kap.append(np.max(kap[mask]))
 
     far = np.asarray(unique_far, dtype=np.float32)
     kap = np.asarray(best_kap, dtype=np.float32)
 
+    # Area under FAR-KAP curve
     score = float(auc(far, kap)) if len(far) > 1 else 0.0
 
     if plot:
+
         plt.figure(figsize=(6, 6))
-        plt.plot(far, kap, marker="o", label=f"OSR-mAP = {score:.4f}")
-        plt.xlabel("FAR (False Acceptance Rate)")
-        plt.ylabel("KAP (Known AP)")
+
+        plt.plot(
+            far,
+            kap,
+            marker="o",
+            label=f"OSR-mAP = {score:.4f}"
+        )
+
+        plt.xlabel("False Acceptance Rate (FAR)")
+        plt.ylabel("Known-query Average Precision (KAP)")
         plt.title("OSR-mAP Curve")
+
         plt.grid(True)
         plt.legend()
         plt.show()
@@ -201,7 +265,7 @@ def osr_map_score(
         "score": score,
         "mode": "open-set",
         "far": far,
-        "kap": kap
+        "kap": kap,
     }
 
     return result if return_curve else score
